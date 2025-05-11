@@ -1,225 +1,184 @@
-# **Membuat Dashboard Dengan Streamlite**
-# **E-Commerce Dashboard**
-
+import streamlit as st
 import pandas as pd
 import matplotlib.pyplot as plt
-import seaborn as sns
-import streamlit as st
-from babel.numbers import format_currency
-from fungsi import DataAnalyzer
+import datetime # Import the datetime module
+# Perbarui import untuk fungsi yang namanya berubah
+from fungsi import load_data, analyze_product_sales, analyze_customer_satisfaction, analyze_monthly_orders
 
-sns.set_theme(style='dark')
+# --- Page configuration ---
+st.set_page_config(
+    page_title="E-commerce Data Analysis Dashboard",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
-# Dataset
-datetime_cols = ["order_approved_at", "order_delivered_carrier_date", "order_delivered_customer_date", "order_estimated_delivery_date", "order_purchase_timestamp", "shipping_limit_date", "review_creation_date"]
-all_df = pd.read_csv("all_data_e-commerse.csv")
-all_df.sort_values(by="order_approved_at", inplace=True)
-all_df.reset_index(inplace=True, drop=True)
+# --- Load data ---
+CSV_FILE_PATH = 'all_data_e-commerse.csv'
 
-# Make sure the column is in datetime format
-all_df["order_approved_at"] = pd.to_datetime(all_df["order_approved_at"], errors='coerce')
+@st.cache_data
+def get_data(path):
+    # The actual date parsing is robust inside load_data
+    return load_data(path)
 
-min_date = all_df["order_approved_at"].min()
-max_date = all_df["order_approved_at"].max()
+# Use st.spinner to show loading progress
+with st.spinner('Loading and processing data...'):
+    data = get_data(CSV_FILE_PATH)
 
-# Then you can safely compare
-main_df = all_df[
-    (all_df["order_approved_at"] >= pd.to_datetime(min_date)) &
-    (all_df["order_approved_at"] <= pd.to_datetime(max_date))
-]
+if data is None:
+    st.error("Failed to load data. Please ensure 'all_data_e-commerse.csv' is in the 'Dashboard' folder and check the file format.")
+    st.stop() # Stop the app if data loading fails
 
-#for col in datetime_cols:
-#    all_df[col] = pd.to_datetime(all_df[col])
+# Ensure the timestamp column is valid and exists for filtering
+if 'order_purchase_timestamp' not in data.columns or not pd.api.types.is_datetime64_any_dtype(data['order_purchase_timestamp']):
+     st.error("Required 'order_purchase_timestamp' column not found or not in datetime format after loading. Cannot apply date filter.")
+     # We could still proceed without the filter, but for this example, let's stop
+     st.stop()
 
+# --- Sidebar ---
+st.sidebar.header("Filters")
 
+# Find min/max dates for the filter, ignoring NaT values
+# Ensure the column exists and is datetime before finding min/max
+if 'order_purchase_timestamp' in data.columns and pd.api.types.is_datetime64_any_dtype(data['order_purchase_timestamp']):
+    min_date_overall = data['order_purchase_timestamp'].min()
+    max_date_overall = data['order_purchase_timestamp'].max()
 
-# Sidebar
-with st.sidebar:
-    # Title
-    st.title("Faizal Riza")
+    # Handle potential NaT results if the column was full of NaT (unlikely but safe)
+    if pd.isna(min_date_overall):
+        min_date_overall = datetime.date.today() # Default to today or some fallback
+    else:
+        min_date_overall = min_date_overall.date()
 
-    # Date Range
-    start_date, end_date = st.date_input(
-        label="Select Date Range",
-        value=[min_date, max_date],
-        min_value=min_date,
-        max_value=max_date
+    if pd.isna(max_date_overall):
+         max_date_overall = datetime.date.today() # Default to today or some fallback
+    else:
+         max_date_overall = max_date_overall.date()
+
+    st.sidebar.subheader("Select Date Range (Order Purchase)")
+
+    # Add the date input widget to the sidebar
+    # Set the default value to the full range of the data
+    selected_date_range = st.sidebar.date_input(
+        "Select period:",
+        value=(min_date_overall, max_date_overall),
+        min_value=min_date_overall,
+        max_value=max_date_overall
     )
 
-# Main
-main_df = all_df[(all_df["order_approved_at"] >= pd.to_datetime(start_date)) &
-                    (all_df["order_approved_at"] <= pd.to_datetime(end_date))]
+    # Ensure selected_date_range is a tuple and has two elements
+    if len(selected_date_range) == 2:
+        start_date_filter = selected_date_range[0]
+        end_date_filter = selected_date_range[1]
 
-function = DataAnalyzer(main_df)
+        # Display selected range
+        st.sidebar.write(f"Applying filter from: **{start_date_filter.strftime('%Y-%m-%d')}** to **{end_date_filter.strftime('%Y-%m-%d')}**")
 
-daily_orders_df = function.create_daily_orders_df()
-sum_spend_df = function.create_sum_spend_df()
-sum_order_items_df = function.create_sum_order_items_df()
-review_score, common_score = function.review_score_df()
-state, most_common_state = function.create_bystate_df()
-order_status, common_status = function.create_order_status()
+        # --- Apply the date filter to the data ---
+        # Filter data based on the selected date range on 'order_purchase_timestamp'
+        # Also handle potential NaT in the timestamp column by dropping rows where it's NaT
+        filtered_data = data.dropna(subset=['order_purchase_timestamp']).copy() # Drop NaT before filtering by date
 
-# Title
-st.header("E-Commerce Dashboard")
+        # Convert filter dates to datetime objects representing the start/end of the day
+        start_datetime = pd.to_datetime(start_date_filter)
+        end_datetime = pd.to_datetime(end_date_filter) + pd.Timedelta(days=1) - pd.Timedelta(seconds=1) # Include the whole end day
 
-# Daily Orders
-st.subheader("Daily Orders")
 
-col1, col2 = st.columns(2)
+        filtered_data = filtered_data[
+            (filtered_data['order_purchase_timestamp'] >= start_datetime) &
+            (filtered_data['order_purchase_timestamp'] <= end_datetime)
+        ].copy() # Use copy() to prevent SettingWithCopyWarning
 
-with col1:
-    total_order = daily_orders_df["order_count"].sum()
-    st.markdown(f"Total Order: **{total_order}**")
+    else:
+        # If only one date is selected or input is incomplete, use the full data
+        st.sidebar.warning("Please select a valid date range.")
+        filtered_data = data.copy() # Use full data if filter is invalid
+else:
+    # If timestamp column was missing or wrong type, use full data (no filtering)
+     filtered_data = data.copy()
 
-with col2:
-    total_revenue = format_currency(daily_orders_df["revenue"].sum(), "IDR", locale="id_ID")
-    st.markdown(f"Total Revenue: **{total_revenue}**")
 
-fig_daily_orders, ax_daily_orders = plt.subplots(figsize=(12, 6))
-ax_daily_orders.plot(
-    daily_orders_df["order_approved_at"],
-    daily_orders_df["order_count"],
-    marker="o",
-    linewidth=2,
-    color="#90CAF9"
-)
-ax_daily_orders.tick_params(axis="x", rotation=45)
-ax_daily_orders.tick_params(axis="y", labelsize=15)
-st.pyplot(fig_daily_orders)
+# --- Check if filtered data is empty ---
+if filtered_data.empty:
+    st.warning("No data available for the selected date range.")
+    # Optionally, you could hide the analysis sections or display specific "No data" messages for each
+    show_analyses = False
+else:
+    show_analyses = True
+    st.subheader(f"Analyzing data from {filtered_data['order_purchase_timestamp'].min().strftime('%Y-%m-%d')} to {filtered_data['order_purchase_timestamp'].max().strftime('%Y-%m-%d')}") # Display actual range of filtered data
 
-# Order Items
-st.subheader("Order Items")
-col1, col2 = st.columns(2)
 
-with col1:
-    total_items = sum_order_items_df["products"].sum()
-    st.markdown(f"Total Items: **{total_items}**")
+# --- Main content Dashboard ---
+# Pastikan show_analyses True sebelum menampilkan analisis
+if show_analyses:
 
-with col2:
-    avg_items = sum_order_items_df["products"].mean()
-    st.markdown(f"Average Items: **{avg_items:.2f}**")
+    # 1. Product Sales Analysis
+    st.header("1. Product Sales Analysis")
+    # Pass the filtered data to the analysis function
+    top_selling, bottom_selling = analyze_product_sales(filtered_data)
 
-fig_order_items, ax_order_items = plt.subplots(nrows=1, ncols=2, figsize=(15, 8)) # Reduced figure size
+    if top_selling is not None and bottom_selling is not None:
+         if not top_selling.empty or not bottom_selling.empty: # Check if results are not empty
+            col1, col2 = st.columns(2)
+            with col1:
+                st.subheader("Top Selling Product Categories")
+                if not top_selling.empty:
+                     st.bar_chart(top_selling)
+                     st.dataframe(top_selling.reset_index().rename(columns={'index': 'Product Category', 'price': 'Total Sales'}))
+                else:
+                    st.info("No top selling products in this range.")
+            with col2:
+                st.subheader("Bottom Selling Product Categories")
+                if not bottom_selling.empty:
+                    st.bar_chart(bottom_selling.sort_values(ascending=True)) # Reverse sort for bottom chart readability
+                    st.dataframe(bottom_selling.reset_index().rename(columns={'index': 'Product Category', 'price': 'Total Sales'}))
+                else:
+                     st.info("No bottom selling products in this range.")
+         else:
+             st.info("No product sales data found for the selected range.")
+    else:
+        st.warning("Could not perform product sales analysis. Check if required columns exist and have data.")
 
-sns.barplot(x="products", y="product_category_name_english", hue=sum_order_items_df["product_category_name_english"], data=sum_order_items_df.head(5), palette="viridis", ax=ax_order_items[0], legend=False)
-ax_order_items[0].set_ylabel(None)
-ax_order_items[0].set_xlabel("Number of Sales")
-ax_order_items[0].set_title("Best Selling products", loc="center")
-ax_order_items[0].tick_params(axis ='y', labelsize=10)
-ax_order_items[0].tick_params(axis ='x', labelsize=10)
 
-sns.barplot(x="products", y="product_category_name_english", hue=sum_order_items_df.sort_values(by="products", ascending=True)["product_category_name_english"], data=sum_order_items_df.sort_values(by="products", ascending=True).head(5), palette="viridis", ax=ax_order_items[1], legend=False)
-ax_order_items[1].set_ylabel(None)
-ax_order_items[1].set_xlabel("Number of Sales")
-ax_order_items[1].invert_xaxis()
-ax_order_items[1].yaxis.set_label_position("right")
-ax_order_items[1].yaxis.tick_right()
-ax_order_items[1].set_title("Worst selling products", loc="center")
-ax_order_items[1].tick_params(axis='y', labelsize=10)
-ax_order_items[1].tick_params(axis='x', labelsize=10)
+    # --- FUNGSI INI DIGANTI NAMANYA & TEXT DIUBAH ---
+    # 2. Customer Satisfaction Analysis
+    st.header("2. Customer Satisfaction Analysis")
+    # Pass the filtered data to the analysis function (now analyzes the selected date range)
+    average_score, score_distribution = analyze_customer_satisfaction(filtered_data) # Panggil fungsi baru
 
-st.pyplot(fig_order_items)
+    # Fungsi analyze_customer_satisfaction mengembalikan 0 jika tidak ada data review
+    if average_score > 0: # Check if average_score is greater than 0 (means data was found in the range)
+        st.subheader("Average Review Score") # Hapus "2018"
+        st.metric("Average Score", f"{average_score:.2f} / 5.0") # Hapus "2018"
 
-# Review Score
-st.subheader("Review Score")
+        st.subheader("Review Score Distribution") # Hapus "2018"
+        fig, ax = plt.subplots()
+        ax.bar(score_distribution.index, score_distribution.values)
+        ax.set_xlabel("Review Score")
+        ax.set_ylabel("Number of Reviews")
+        ax.set_title("Distribution of Review Scores (within selected range)") # Ubah judul plot
+        ax.set_xticks(score_distribution.index) # Ensure all scores 1-5 are shown if they exist
+        st.pyplot(fig)
+        plt.close(fig) # Close the figure to free memory
 
-# Convert start_date and end_date to datetime objects
-start_date = pd.to_datetime(start_date)
-end_date = pd.to_datetime(end_date)
+        st.dataframe(score_distribution.reset_index().rename(columns={'index':'Score', 'review_score':'Count'}))
 
-# Convert 'review_creation_date' column to datetime if not already
-all_df['review_creation_date'] = pd.to_datetime(all_df['review_creation_date'], format='ISO8601')
+    else:
+        # Pesan ini ditampilkan jika analyze_customer_satisfaction mengembalikan 0
+        st.info("No review data available for the selected date range.") # Ubah pesan
 
-# Filter data based on the selected date range
-review_data = all_df[
-    (all_df['review_creation_date'] >= start_date) &
-    (all_df['review_creation_date'] <= end_date)
-]
 
-col1, col2 = st.columns(2)
+    # 3. Monthly Order Analysis
+    st.header("3. Monthly Order Analysis")
+    # Pass the filtered data to the analysis function
+    monthly_orders = analyze_monthly_orders(filtered_data)
 
-with col1:
-    total_reviews = review_data.shape[0]
-    st.markdown(f"Total Reviews: **{total_reviews}**")
+    if monthly_orders is not None and not monthly_orders.empty: # Check if not None and not empty
+        st.subheader("Monthly Order Trend (within selected date range)")
+        st.line_chart(monthly_orders)
+        st.dataframe(monthly_orders.reset_index().rename(columns={'index': 'Month', 0: 'Order Count'}))
+    else:
+        st.info("No monthly order data found for the selected date range.")
 
-with col2:
-    avg_review = review_data['review_score'].mean()
-    st.markdown(f"Average Review Score: **{avg_review:.2f}**")
-
-fig_review, ax_review = plt.subplots(figsize=(10, 5)) # Use subplots
-sns.countplot(x=review_data['review_creation_date'].dt.month,
-              hue=review_data['review_score'],
-              palette="viridis",
-              ax=ax_review)
-
-ax_review.set_title("Customer Satisfaction", fontsize=15)
-ax_review.set_xlabel("Month")
-ax_review.set_ylabel("Count of Reviews")
-ax_review.legend(title="Review Score", loc='upper right', bbox_to_anchor=(1.2, 1))
-
-months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Des']
-ax_review.set_xticks(range(0, 12))
-ax_review.set_xticklabels(months)
-
-st.pyplot(fig_review)
-
-# Order Approved
-st.subheader("Orders Approved")
-
-orders_approved_df = all_df[(all_df['order_approved_at'] >= start_date) & (all_df['order_approved_at'] <= end_date)]
-
-monthly_order = orders_approved_df.resample(rule='ME', on='order_approved_at').agg({
-    "order_id": "size",
-})
-monthly_order.index = monthly_order.index.strftime('%B')
-monthly_order = monthly_order.reset_index()
-monthly_order.rename(columns={
-    "order_id": "order_count",
-    "order_approved_at": "month"
-}, inplace=True)
-
-month_mapping = {
-    "January": 1,
-    "February": 2,
-    "March": 3,
-    "April": 4,
-    "May": 5,
-    "June": 6,
-    "July": 7,
-    "August": 8,
-    "September": 9,
-    "October": 10,
-    "November": 11,
-    "December": 12
-}
-
-monthly_order["month_numeric"] = monthly_order["month"].map(month_mapping)
-monthly_order = monthly_order.sort_values("month_numeric")
-monthly_order = monthly_order.drop("month_numeric", axis=1)
-
-col1, col2 = st.columns(2)
-
-with col1:
-    # Calculate total orders and average orders per month
-    total_orders = orders_approved_df.shape[0]
-    st.markdown(f"Total Orders Approved: **{total_orders}**")
-
-with col2:
-    # Average orders per month
-    avg_orders_per_month = orders_approved_df.resample(rule='ME', on='order_approved_at').size().mean()
-    st.markdown(f"Average Orders per Month: **{avg_orders_per_month:.2f}**")
-
-fig_monthly_orders, ax_monthly_orders = plt.subplots(figsize=(10, 5)) # Use subplots
-ax_monthly_orders.plot(
-    monthly_order["month"],
-    monthly_order["order_count"],
-    marker='o',
-    linewidth=2,
-    color="#72BCD4"
-)
-ax_monthly_orders.set_title("Number of Orders Approved per Month", loc="center")
-ax_monthly_orders.tick_params(axis="x", rotation=45)
-ax_monthly_orders.tick_params(axis="y", labelsize=10)
-st.pyplot(fig_monthly_orders)
-
-st.caption('Copyright (C) Faizal Riza 2025')
+# --- Footer (Optional) ---
+st.markdown("---")
+st.write("Dashboard Sederhana dibuat dengan Streamlit")
